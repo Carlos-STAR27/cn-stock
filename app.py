@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from datetime import datetime, date, timedelta
 import subprocess
 import sys
-from utils.db_utils import get_config, get_db_engine  # 复用 db_utils 中的逻辑
+from utils.db_utils import get_config, get_db_engine, get_db_config_debug  # 复用 db_utils 中的逻辑
 
 # 加载环境变量
 load_dotenv()
@@ -167,6 +167,19 @@ if engine:
     except Exception as e:
         st.sidebar.error("❌ 数据库连接异常")
         st.sidebar.caption(f"Error: {str(e)[:50]}...")
+        
+        # 显示详细的 SSL 路径调试信息
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🔍 SSL 诊断")
+        try:
+            debug_info = get_db_config_debug()
+            st.sidebar.text(f"Raw CA: {debug_info.get('raw_ssl_ca')}")
+            st.sidebar.text(f"Raw Exists: {debug_info.get('raw_ssl_ca_exists')}")
+            st.sidebar.text(f"Final CA: {debug_info.get('final_ssl_ca')}")
+            st.sidebar.text(f"Final Exists: {debug_info.get('final_ssl_ca_exists')}")
+            st.sidebar.text(f"Certifi: {debug_info.get('certifi_where')}")
+        except Exception as debug_e:
+            st.sidebar.error(f"Debug failed: {debug_e}")
 else:
     st.sidebar.error("❌ 数据库未连接")
     st.sidebar.info("请检查 .env 文件或 Secrets 配置")

@@ -70,6 +70,35 @@ def get_db_engine():
         pool_recycle=3600    # 1小时回收连接
     )
 
+def get_db_config_debug():
+    """
+    返回数据库配置的调试信息 (仅用于诊断 SSL 路径问题)
+    """
+    debug_info = {}
+    
+    # 1. 原始配置的 CA 路径
+    raw_ssl_ca = get_config('TIDB_CA_PATH')
+    debug_info['raw_ssl_ca'] = raw_ssl_ca
+    
+    # 2. 检查原始路径是否存在
+    if raw_ssl_ca:
+        debug_info['raw_ssl_ca_exists'] = os.path.exists(raw_ssl_ca)
+    else:
+        debug_info['raw_ssl_ca_exists'] = None
+        
+    # 3. 最终使用的 CA 路径
+    ssl_ca = raw_ssl_ca
+    if ssl_ca and not os.path.exists(ssl_ca):
+        ssl_ca = None
+    if not ssl_ca:
+        ssl_ca = certifi.where()
+        
+    debug_info['final_ssl_ca'] = ssl_ca
+    debug_info['final_ssl_ca_exists'] = os.path.exists(ssl_ca)
+    debug_info['certifi_where'] = certifi.where()
+    
+    return debug_info
+
 def log_task_execution(task_name, status, message=""):
     """记录任务执行日志"""
     engine = get_db_engine()
