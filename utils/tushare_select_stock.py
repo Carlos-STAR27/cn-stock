@@ -25,40 +25,31 @@
 
 import pandas as pd
 import pymysql
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 # 导入节假日判断库，用于工作日/节假日识别
 from chinese_calendar import is_holiday, is_workday
 import os
+import sys
 from dotenv import load_dotenv
+
+# 添加当前目录到系统路径，以便导入 db_utils
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+try:
+    from db_utils import get_db_engine, log_task_execution
+except ImportError:
+    sys.path.append(os.path.join(os.path.dirname(current_dir)))
+    from utils.db_utils import get_db_engine, log_task_execution
 
 # 加载环境变量
 load_dotenv()
+load_dotenv('.env.local')
 
-# ========================== 数据库配置区 ==========================
-# 数据库连接配置（优先从环境变量读取）
-mysql_config = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'port': int(os.getenv('DB_PORT', 3306)),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', 'showlang'),
-    'database': os.getenv('DB_NAME', 'cn_stock'),
-    'ssl_ca': os.getenv('TIDB_CA_PATH', '/etc/ssl/cert.pem') if 'tidbcloud' in os.getenv('DB_HOST', '') else None
-}
-
-# 创建SQLAlchemy数据库连接引擎
-connect_args = {}
-if mysql_config['ssl_ca']:
-    connect_args['ssl'] = {'ca': mysql_config['ssl_ca'], 'check_hostname': False}
-
-engine = create_engine(
-    f"mysql+pymysql://{mysql_config['user']}:{mysql_config['password']}@"
-    f"{mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']}",
-    connect_args=connect_args,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True  # 检查连接有效性
-)
+# 获取数据库连接引擎
+engine = get_db_engine()
 
 
 # ========================== 数据读取模块 ==========================
@@ -340,111 +331,127 @@ if __name__ == "__main__":
         end_date = default_end_date
 
     # ===================== 数据加载与选股 =====================
-    # 加载指定日期区间的股票日线数据
-    print(f"\n📥 正在读取 {start_date} 至 {end_date} 的股票日线数据...")
-    stock_df = load_stock_data(start_date=start_date, end_date=end_date)
+    try:
+        log_task_execution("选股", "RUNNING", f"开始执行选股: {start_date} - {end_date}")
+        
+        # 加载指定日期区间的股票日线数据
+        print(f"\n📥 正在读取 {start_date} 至 {end_date} 的股票日线数据...")
+        stock_df = load_stock_data(start_date=start_date, end_date=end_date)
 
-    # 执行核心选股逻辑
-    print("🔍 正在执行选股逻辑...")
-    Stock_Selected = select_stocks(stock_df, d1=0)
+        # 执行核心选股逻辑
+        print("🔍 正在执行选股逻辑...")
+        Stock_Selected = select_stocks(stock_df, d1=0)
 
-    # ===================== 结果数据处理 =====================
-    # 清理所有ref_开头的临时字段（双重保障）
-    ref_columns = [col for col in Stock_Selected.columns if col.startswith('ref_')]
-    if ref_columns:
-        Stock_Selected = Stock_Selected.drop(columns=ref_columns)
+        # ===================== 结果数据处理 =====================
+        # 清理所有ref_开头的临时字段（双重保障）
+        ref_columns = [col for col in Stock_Selected.columns if col.startswith('ref_')]
+        if ref_columns:
+            Stock_Selected = Stock_Selected.drop(columns=ref_columns)
 
-    # 添加程序执行时间字段
-    # 获取当前时间（程序执行结束时间）
-    execute_end_time = datetime.now()
-    # 执行日期（格式：YYYY-MM-DD）
-    Stock_Selected['execute_date'] = execute_end_time.strftime('%Y-%m-%d')
-    # 执行时间（格式：HH:MM:SS）
-    Stock_Selected['execute_time'] = execute_end_time.strftime('%H:%M:%S')
+        # 添加程序执行时间字段
+        # 获取当前时间（程序执行结束时间）
+        execute_end_time = datetime.now()
+        # 执行日期（格式：YYYY-MM-DD）
+        Stock_Selected['execute_date'] = execute_end_time.strftime('%Y-%m-%d')
+        # 执行时间（格式：HH:MM:SS）
+        Stock_Selected['execute_time'] = execute_end_time.strftime('%H:%M:%S')
 
-    # 调整字段顺序：将execute_date和execute_time放到最前面
-    if not Stock_Selected.empty:
-        cols = Stock_Selected.columns.tolist()
-        cols.remove('execute_date')
-        cols.remove('execute_time')
-        new_cols = ['execute_date', 'execute_time'] + cols
-        Stock_Selected = Stock_Selected[new_cols]
+        # 调整字段顺序：将execute_date和execute_time放到最前面
+        if not Stock_Selected.empty:
+            cols = Stock_Selected.columns.tolist()
+            cols.remove('execute_date')
+            cols.remove('execute_time')
+            new_cols = ['execute_date', 'execute_time'] + cols
+            Stock_Selected = Stock_Selected[new_cols]
 
-        # 日期格式转换：将trade_date/buy_date/gold_date转为YYYYMMDD字符串格式
-        Stock_Selected['trade_date'] = Stock_Selected['trade_date'].dt.strftime('%Y%m%d')
-        Stock_Selected['buy_date'] = Stock_Selected['buy_date'].dt.strftime('%Y%m%d')
-        Stock_Selected['gold_date'] = Stock_Selected['gold_date'].dt.strftime('%Y%m%d')
+            # 日期格式转换：将trade_date/buy_date/gold_date转为YYYYMMDD字符串格式
+            Stock_Selected['trade_date'] = Stock_Selected['trade_date'].dt.strftime('%Y%m%d')
+            Stock_Selected['buy_date'] = Stock_Selected['buy_date'].dt.strftime('%Y%m%d')
+            Stock_Selected['gold_date'] = Stock_Selected['gold_date'].dt.strftime('%Y%m%d')
 
-    # ===================== 结果输出与数据库写入 =====================
-    print("\n📊 ===== 选股结果 ======")
-    if not Stock_Selected.empty:
-        # 输出选股结果统计信息
-        print(f"✅ 共筛选出 {len(Stock_Selected)} 条符合条件的股票记录")
-        # 展示核心字段的结果（便于快速查看）
-        print("\n核心结果预览：")
-        print(Stock_Selected[['execute_date', 'execute_time', 'ts_code', 'trade_date',
-                              'gold_date', 'buy_date', 'price_close', 'vol', 'price_low']])
+        # ===================== 结果输出与数据库写入 =====================
+        print("\n📊 ===== 选股结果 ======")
+        if not Stock_Selected.empty:
+            # 输出选股结果统计信息
+            print(f"✅ 共筛选出 {len(Stock_Selected)} 条符合条件的股票记录")
+            # 展示核心字段的结果（便于快速查看）
+            print("\n核心结果预览：")
+            print(Stock_Selected[['execute_date', 'execute_time', 'ts_code', 'trade_date',
+                                  'gold_date', 'buy_date', 'price_close', 'vol', 'price_low']])
 
-        # 将结果写入MySQL数据库（基于4个联合主键实现存在更新、不存在插入）
-        print("\n📤 开始写入MySQL数据库...")
-        try:
-            # 1. 先创建数据库连接游标
-            conn = engine.raw_connection()
-            cursor = conn.cursor()
+            # 将结果写入MySQL数据库（基于4个联合主键实现存在更新、不存在插入）
+            print("\n📤 开始写入MySQL数据库...")
+            try:
+                # 1. 先创建数据库连接游标
+                conn = engine.raw_connection()
+                cursor = conn.cursor()
 
-            # 2. 遍历每条数据，执行INSERT ... ON DUPLICATE KEY UPDATE逻辑
-            # 提取字段列表（排除索引）
-            columns = Stock_Selected.columns.tolist()
-            # 构建字段字符串
-            cols_str = ', '.join(columns)
-            # 构建占位符字符串
-            placeholders = ', '.join(['%s'] * len(columns))
-            # 构建更新字符串（主键字段不更新，其他字段更新）
-            update_str = ', '.join([
-                f"{col} = VALUES({col})"
-                for col in columns
-                if col not in ['execute_date', 'execute_time', 'ts_code', 'trade_date']
-            ])
+                # 2. 遍历每条数据，执行INSERT ... ON DUPLICATE KEY UPDATE逻辑
+                # 提取字段列表（排除索引）
+                columns = Stock_Selected.columns.tolist()
+                # 构建字段字符串
+                cols_str = ', '.join(columns)
+                # 构建占位符字符串
+                placeholders = ', '.join(['%s'] * len(columns))
+                # 构建更新字符串（主键字段不更新，其他字段更新）
+                update_str = ', '.join([
+                    f"{col} = VALUES({col})"
+                    for col in columns
+                    if col not in ['execute_date', 'execute_time', 'ts_code', 'trade_date']
+                ])
 
-            # 3. 批量处理数据
-            batch_size = 1000
-            total_rows = len(Stock_Selected)
-            inserted_count = 0
-            updated_count = 0
+                # 3. 批量处理数据
+                batch_size = 1000
+                total_rows = len(Stock_Selected)
+                inserted_count = 0
+                updated_count = 0
 
-            for i in range(0, total_rows, batch_size):
-                # 截取批次数据
-                batch_data = Stock_Selected.iloc[i:i + batch_size]
-                # 转换为元组列表
-                values = [tuple(row) for row in batch_data.values]
+                for i in range(0, total_rows, batch_size):
+                    # 截取批次数据
+                    batch_data = Stock_Selected.iloc[i:i + batch_size]
+                    # 转换为元组列表
+                    values = [tuple(row) for row in batch_data.values]
 
-                # 构建批量插入SQL语句（MySQL特有ON DUPLICATE KEY UPDATE）
-                sql = f"""
-                INSERT INTO stock_selected ({cols_str}) 
-                VALUES ({placeholders}) 
-                ON DUPLICATE KEY UPDATE {update_str}
-                """
+                    # 构建批量插入SQL语句（MySQL特有ON DUPLICATE KEY UPDATE）
+                    sql = f"""
+                    INSERT INTO stock_selected ({cols_str}) 
+                    VALUES ({placeholders}) 
+                    ON DUPLICATE KEY UPDATE {update_str}
+                    """
 
-                # 执行批量插入/更新
-                cursor.executemany(sql, values)
-                # 统计插入/更新行数
-                rowcount = cursor.rowcount
-                inserted_count += rowcount - updated_count  # 新增行数
-                updated_count += rowcount // 2  # 更新行数（MySQL中更新时rowcount返回2）
+                    # 执行批量插入/更新
+                    cursor.executemany(sql, values)
+                    # 统计插入/更新行数
+                    rowcount = cursor.rowcount
+                    # MySQL behavior: returns 1 for insert, 2 for update, 0 for no change
+                    # But if we use executemany, rowcount is sum of rowcounts.
+                    # This logic might be approximate but good enough for logging
+                    inserted_count += rowcount 
+                    
+                # 4. 提交事务
+                conn.commit()
+                print(f"✅ 数据库写入完成！影响行数: {inserted_count}")
 
-            # 4. 提交事务
-            conn.commit()
-            print(f"✅ 数据库写入完成！新增 {inserted_count} 条，更新 {updated_count} 条")
+                # 5. 关闭游标和连接
+                cursor.close()
+                conn.close()
+                
+                log_task_execution("选股", "SUCCESS", f"成功筛选出 {len(Stock_Selected)} 条记录，数据库影响行数: {inserted_count}")
 
-            # 5. 关闭游标和连接
-            cursor.close()
-            conn.close()
+            except Exception as e:
+                print(f"❌ 数据库写入失败：{str(e)}")
+                log_task_execution("选股", "FAIL", f"数据库写入失败: {str(e)}")
+                # 出错时回滚事务
+                if 'conn' in locals() and conn.open:
+                    conn.rollback()
+        else:
+            print("⚠️ 未筛选出符合条件的股票")
+            log_task_execution("选股", "SUCCESS", "未筛选出符合条件的股票")
+            
+    except Exception as e:
+        print(f"❌ 执行选股出错: {e}")
+        log_task_execution("选股", "FAIL", f"执行出错: {e}")
 
-        except Exception as e:
-            print(f"❌ 数据库写入失败：{str(e)}")
-            # 出错时回滚事务
-            if 'conn' in locals() and conn.open:
-                conn.rollback()
 
         # 可选：将结果保存到Excel文件
         # Stock_Selected.to_excel('选股结果.xlsx', index=False)

@@ -9,6 +9,7 @@ import sys
 
 # 加载环境变量
 load_dotenv()
+load_dotenv('.env.local')
 
 # 字段中文别名映射
 COLUMN_DISPLAY_MAP = {
@@ -137,143 +138,68 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 侧边栏：数据库配置 ---
-st.sidebar.header("数据库连接配置")
+st.sidebar.header("系统状态")
 
-# 尝试从环境变量获取默认值
-default_host = os.getenv("DB_HOST", "localhost")
-default_port = os.getenv("DB_PORT", "3306")
-default_user = os.getenv("DB_USER", "root")
-default_password = os.getenv("DB_PASSWORD", "")
-default_db = os.getenv("DB_NAME", "")
-
-# 允许用户在界面上覆盖
-db_host = st.sidebar.text_input("Host", value=default_host)
-db_port = st.sidebar.text_input("Port", value=default_port)
-db_user = st.sidebar.text_input("User", value=default_user)
-db_password = st.sidebar.text_input("Password", value=default_password, type="password")
-db_name = st.sidebar.text_input("Database Name", value=default_db)
+# 从环境变量获取配置
+db_host = os.getenv("DB_HOST")
+db_port = os.getenv("DB_PORT", "3306")
+db_user = os.getenv("DB_USER")
+db_password = os.getenv("DB_PASSWORD")
+db_name = os.getenv("DB_NAME")
+ssl_ca = os.getenv("TIDB_CA_PATH", "/etc/ssl/cert.pem")
 
 # 构建数据库连接 URL
-# format: mysql+pymysql://user:password@host:port/dbname
-# TiDB Cloud 需要 SSL 安全连接，即使不指定 ca 证书，通常也建议加上 ssl_verify_cert=true 或者默认尝试 SSL
-# 这里针对 TiDB Cloud 进行特殊处理，添加 ssl={"ssl_ca": "/etc/ssl/cert.pem"} 如果需要的话
-# 简化起见，TiDB Cloud 通常支持标准的 SSL 连接，我们可以尝试添加 ?ssl_ca=/etc/ssl/cert.pem&ssl_verify_cert=true
-# 或者更简单的：mysql+pymysql://user:password@host:port/dbname?ssl={"ssl_mode":"PREFERRED"}
+connect_args = {}
+if db_host and 'tidbcloud' in db_host:
+    connect_args['ssl'] = {'ca': ssl_ca, 'check_hostname': False}
 
-if "tidbcloud" in db_host:
-    # TiDB Cloud 连接字符串优化
-    db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?ssl_ca=/etc/ssl/cert.pem&ssl_verify_cert=true"
-else:
-    db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 # 连接测试与引擎创建
 @st.cache_resource
-def get_engine(url):
-    return create_engine(url)
+def get_engine(url, connect_args):
+    return create_engine(url, connect_args=connect_args)
 
 engine = None
 connection_success = False
 
-if st.sidebar.button("测试/刷新连接"):
-    try:
-        engine = get_engine(db_url)
+try:
+    if db_host and db_user:
+        engine = get_engine(db_url, connect_args)
+        # 简单测试连接
         with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        st.sidebar.success("连接成功！")
+             pass
         connection_success = True
-    except Exception as e:
-        st.sidebar.error(f"连接失败: {e}")
-else:
-    # 尝试自动连接
-    if db_name and db_user:
-        try:
-            engine = get_engine(db_url)
-            connection_success = True
-        except:
-            pass
+        st.sidebar.success("✅ 数据库已连接")
+    else:
+        st.sidebar.warning("⚠️ 缺少数据库环境变量配置")
+except Exception as e:
+    st.sidebar.error("❌ 数据库连接失败")
+    # 仅在调试模式或本地开发时打印详细错误，生产环境隐藏
+    # st.sidebar.error(f"Error: {e}")
 
-import baostock as bs
-
-# --- 辅助函数：更新股票名称 ---
-def update_stock_names_from_baostock(engine):
-    """
-    从 BaoStock 获取全市场股票名称并更新到 stock_name 表
-    返回: (success: bool, message: str, count: int)
-    """
+# --- 辅助函数：读取任务日志 ---
+def get_task_logs(task_name, limit=20):
+    """读取指定任务的最近日志"""
+    if not engine:
+        return pd.DataFrame()
+    
     try:
-        # 1. 登录 BaoStock
-        lg = bs.login()
-        if lg.error_code != '0':
-            return False, f"BaoStock 登录失败: {lg.error_msg}", 0
-
-        # 2. 获取所有股票列表
-        today = date.today().strftime('%Y-%m-%d')
-        rs = bs.query_all_stock(day=today)
+        query = text("""
+        SELECT execute_time, status, message 
+        FROM task_logs 
+        WHERE task_name = :task_name 
+        ORDER BY execute_time DESC 
+        LIMIT :limit
+        """)
         
-        data_list = []
-        while (rs.error_code == '0') & rs.next():
-            data_list.append(rs.get_row_data())
-            
-        result = pd.DataFrame(data_list, columns=rs.fields)
-        
-        # 如果今天没数据（可能是周末/节假日），尝试回退几天
-        if result.empty:
-            for i in range(1, 5):
-                prev_date = (date.today() - timedelta(days=i)).strftime('%Y-%m-%d')
-                rs = bs.query_all_stock(day=prev_date)
-                data_list = []
-                while (rs.error_code == '0') & rs.next():
-                    data_list.append(rs.get_row_data())
-                result = pd.DataFrame(data_list, columns=rs.fields)
-                if not result.empty:
-                    break
-        
-        if result.empty:
-            bs.logout()
-            return False, "未获取到股票数据，请检查网络或 BaoStock 服务状态", 0
-
-        # 3. 数据处理
-        # BaoStock: sh.600000 -> Tushare: 600000.SH
-        def convert_code(baostock_code):
-            if not baostock_code or "." not in baostock_code:
-                return baostock_code
-            market, code = baostock_code.split(".")
-            return f"{code}.{market.upper()}"
-
-        df_save = pd.DataFrame()
-        df_save['ts_code'] = result['code'].apply(convert_code)
-        df_save['ts_code_name'] = result['code_name']
-        
-        # 过滤掉空的名称
-        df_save = df_save[df_save['ts_code_name'] != '']
-        
-        if df_save.empty:
-             bs.logout()
-             return False, "处理后数据为空", 0
-
-        # 4. 存入数据库
         with engine.connect() as conn:
-            # 创建表 (如果不存在)
-            conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS stock_name (
-                ts_code VARCHAR(20) PRIMARY KEY,
-                ts_code_name VARCHAR(50)
-            )
-            """))
-            # 清空表
-            conn.execute(text("TRUNCATE TABLE stock_name"))
-            conn.commit()
-            
-        # 写入新数据
-        df_save.to_sql('stock_name', engine, if_exists='append', index=False, chunksize=1000)
-        
-        count = len(df_save)
-        bs.logout()
-        return True, "成功", count
-
+            result = conn.execute(query, {"task_name": task_name, "limit": limit})
+            return pd.DataFrame(result.fetchall(), columns=["执行时间", "状态", "详情"])
     except Exception as e:
-        bs.logout()
-        return False, f"发生异常: {str(e)}", 0
+        st.error(f"读取日志失败: {e}")
+        return pd.DataFrame()
+
 
 # --- 辅助函数：运行外部脚本 ---
 def run_script(script_path, inputs):
@@ -596,6 +522,14 @@ with tab3:
         st.info(f"参数: {start_str} - {end_str}")
         
         run_script(script_path_update, [start_str, end_str])
+        
+    # 展示任务执行日志
+    st.markdown("### 最近任务日志")
+    df_logs = get_task_logs("日K线抽取", 20)
+    if not df_logs.empty:
+        st.dataframe(df_logs, use_container_width=True)
+    else:
+        st.info("暂无执行记录")
 
 # --- Tab 4: 数据管理 ---
 with tab4:
@@ -687,11 +621,16 @@ with tab4:
 with tab5:
     st.markdown('<span style="color: #C0C0C0;">从 BaoStock 抽取全部股票名称。</span>', unsafe_allow_html=True)
     
+    script_path_names = os.path.join(os.path.dirname(__file__), "utils", "baostock_update_names.py")
+    
     if st.button("抽取", type="primary", key="extract_names_btn"):
-        with st.spinner("正在连接 BaoStock 并获取数据，请稍候..."):
-            success, msg, count = update_stock_names_from_baostock(engine)
-            
-        if success:
-            st.success(f"抽取成功，共获取到 {count} 条股票记录。")
-        else:
-            st.error(f"抽取失败: {msg}")
+        st.info(f"正在执行脚本: {script_path_names}")
+        run_script(script_path_names, [])
+        
+    # 展示任务执行日志
+    st.markdown("### 最近任务日志")
+    df_logs = get_task_logs("股票名称抽取", 20)
+    if not df_logs.empty:
+        st.dataframe(df_logs, use_container_width=True)
+    else:
+        st.info("暂无执行记录")

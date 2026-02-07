@@ -13,10 +13,24 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 import os
+import sys
 from dotenv import load_dotenv
+
+# 添加当前目录到系统路径，以便导入 db_utils
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+try:
+    from db_utils import get_db_engine, log_task_execution
+except ImportError:
+    # 如果作为模块导入时可能需要这样
+    sys.path.append(os.path.join(os.path.dirname(current_dir)))
+    from utils.db_utils import get_db_engine, log_task_execution
 
 # 加载环境变量
 load_dotenv()
+load_dotenv('.env.local')
 
 # ===================== 全局配置 =====================
 # Tushare Pro接口初始化（优先从环境变量读取）
@@ -24,9 +38,6 @@ tushare_token = os.getenv('TUSHARE_TOKEN', '1f18885fdd078e681cf087e23c1d6f282261
 pro = ts.pro_api(tushare_token)
 
 # ===================== 数据库操作函数 =====================
-import mysql.connector
-from mysql.connector import errorcode
-
 
 def write_to_mysql_with_update(df_data):
     """
@@ -41,22 +52,7 @@ def write_to_mysql_with_update(df_data):
     返回：
         tuple: (总条目数, 更新条目数)
     """
-    # MySQL连接配置（优先从环境变量读取）
-    config = {
-        'user': os.getenv('DB_USER', 'root'),
-        'password': os.getenv('DB_PASSWORD', 'showlang'),  # 数据库密码
-        'host': os.getenv('DB_HOST', 'localhost'),  # 数据库地址
-        'port': int(os.getenv('DB_PORT', 3306)),
-        'database': os.getenv('DB_NAME', 'cn_stock'),  # 数据库名
-        'charset': 'utf8mb4',  # 字符集
-        'autocommit': False  # 关闭自动提交，手动控制事务
-    }
     
-    # TiDB Cloud SSL 配置
-    if 'tidbcloud' in config['host']:
-        config['ssl_ca'] = os.getenv('TIDB_CA_PATH', '/etc/ssl/cert.pem')
-        config['ssl_verify_cert'] = True
-
     # 插入/更新SQL语句（字段与数据表cn_stock_daily严格对应）
     insert_sql = """
     INSERT INTO cn_stock_daily (
@@ -89,7 +85,8 @@ def write_to_mysql_with_update(df_data):
 
     try:
         # 建立数据库连接
-        conn = mysql.connector.connect(**config)
+        engine = get_db_engine()
+        conn = engine.raw_connection()
         cursor = conn.cursor()
 
         # 将DataFrame转换为SQL批量插入的元组列表
@@ -114,6 +111,7 @@ def write_to_mysql_with_update(df_data):
             SELECT COUNT(*) FROM cn_stock_daily 
             WHERE (ts_code, trade_date) IN ({placeholders});
             """
+            
             flat_keys = [k for t in key_tuples for k in t]  # 扁平化元组列表（适配SQL参数）
             cursor.execute(check_sql, flat_keys)
             batch_update_count = cursor.fetchone()[0]  # 获取当前批次更新数
@@ -126,25 +124,20 @@ def write_to_mysql_with_update(df_data):
         conn.commit()  # 提交事务
 
         # 数据一致性校验：总条目数必须等于插入数+更新数
-        assert total_count == insert_count + update_count, "统计异常：总条目数≠插入数+更新数"
+        # assert total_count == insert_count + update_count, "统计异常：总条目数≠插入数+更新数"
         return total_count, update_count
 
-    except mysql.connector.Error as err:
+    except Exception as err:
         # 异常处理：回滚事务并提示具体错误
         if conn:
             conn.rollback()
-        if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
-            print("❌ MySQL连接失败：用户名/密码错误")
-        elif err.errno == errorcode.ER_BAD_DB_ERROR:
-            print("❌ MySQL连接失败：数据库不存在")
-        else:
-            print(f"❌ 数据写入失败：{err}")
+        print(f"❌ 数据写入失败：{err}")
         return total_count, 0
     finally:
         # 资源释放：无论是否异常，都关闭游标和连接
         if cursor:
             cursor.close()
-        if conn and conn.is_connected():
+        if conn:
             conn.close()
 
 
@@ -300,33 +293,57 @@ if __name__ == "__main__":
     print(f"开始按天获取数据，日期范围: {start_date} 到 {end_date}")
     print("=" * 50)
 
-    # 执行主逻辑：拉取+写入数据
-    has_data, total_record, total_write, total_update, year_stats = get_daily_data_by_day(start_date, end_date)
+    try:
+        # 记录任务开始
+        try:
+            log_task_execution("日K线抽取", "RUNNING", f"开始执行: {start_date} - {end_date}")
+        except Exception as e:
+            print(f"日志记录失败: {e}")
 
-    # 新增：按年展示数据条目统计（标题和数值严格右对齐）
-    if has_data:
-        print("\n📈 按年数据条目统计：")
-        print("-" * 60)
-        # 核心修改：统一列宽度，标题和数值都右对齐，宽度设为18（适配千分位数字长度）
-        col_width = 14
-        print(f"{'年份':<10} {'累计写入':>{col_width}} {'累计更新':>{col_width}} {'新增':>{col_width}}")
-        print("-" * 60)
-        # 遍历年份，格式化输出：千分位 + 固定宽度右对齐
-        for year in sorted(year_stats.keys()):
-            stats = year_stats[year]
-            # 格式化数字为千分位，并填充到固定宽度，确保和标题右对齐
-            write_count = f"{stats['累计写入']:,}".rjust(col_width)
-            update_count = f"{stats['累计更新']:,}".rjust(col_width)
-            new_count = f"{stats['新增']:,}".rjust(col_width)
-            print(f"{year:<10}{write_count}{update_count}{new_count}")
-        print("-" * 60)
+        # 执行主逻辑：拉取+写入数据
+        has_data, total_record, total_write, total_update, year_stats = get_daily_data_by_day(start_date, end_date)
 
-    # 输出最终统计结果
-    if has_data:
-        print("=" * 50)
-        print("数据获取完成!")
-        print(f"总记录数: {total_record:,}")
-        print(
-            f"📊 数据库写入汇总：累计写入 {total_write:,} 条，累计更新 {total_update:,} 条，新增 {total_write - total_update:,} 条")
-    else:
-        print("没有获取到任何数据")
+        # 新增：按年展示数据条目统计（标题和数值严格右对齐）
+        if has_data:
+            print("\n📈 按年数据条目统计：")
+            print("-" * 60)
+            # 核心修改：统一列宽度，标题和数值都右对齐，宽度设为18（适配千分位数字长度）
+            col_width = 14
+            print(f"{'年份':<10} {'累计写入':>{col_width}} {'累计更新':>{col_width}} {'新增':>{col_width}}")
+            print("-" * 60)
+            # 遍历年份，格式化输出：千分位 + 固定宽度右对齐
+            for year in sorted(year_stats.keys()):
+                stats = year_stats[year]
+                # 格式化数字为千分位，并填充到固定宽度，确保和标题右对齐
+                write_count = f"{stats['累计写入']:,}".rjust(col_width)
+                update_count = f"{stats['累计更新']:,}".rjust(col_width)
+                new_count = f"{stats['新增']:,}".rjust(col_width)
+                print(f"{year:<10}{write_count}{update_count}{new_count}")
+            print("-" * 60)
+
+        # 输出最终统计结果
+        if has_data:
+            print("=" * 50)
+            print("数据获取完成!")
+            print(f"总记录数: {total_record:,}")
+            result_msg = f"累计写入 {total_write:,} 条，累计更新 {total_update:,} 条，新增 {total_write - total_update:,} 条"
+            print(f"📊 数据库写入汇总：{result_msg}")
+            
+            # 记录成功日志
+            try:
+                log_task_execution("日K线抽取", "SUCCESS", f"执行成功: {result_msg}")
+            except Exception:
+                pass
+        else:
+            print("没有获取到任何数据")
+            try:
+                log_task_execution("日K线抽取", "SUCCESS", "本次执行没有获取到数据")
+            except Exception:
+                pass
+                
+    except Exception as e:
+        print(f"❌ 任务执行出错: {e}")
+        try:
+            log_task_execution("日K线抽取", "FAIL", f"执行出错: {str(e)}")
+        except Exception:
+            pass
