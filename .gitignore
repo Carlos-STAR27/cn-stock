@@ -1,0 +1,24 @@
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables
+.env
+.env.local
+
+# IDE settings
+.vscode/
+.idea/
+.trae/
+
+# Mac OS
+.DS_Store
+
+# Streamlit
+.streamlit/

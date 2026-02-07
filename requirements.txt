@@ -1,0 +1,9 @@
+streamlit
+pandas
+pymysql
+sqlalchemy
+python-dotenv
+cryptography
+tushare
+chinese_calendar
+mysql-connector-python

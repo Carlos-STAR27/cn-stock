@@ -1,0 +1,697 @@
+import streamlit as st
+import pandas as pd
+from sqlalchemy import create_engine, text
+import os
+from dotenv import load_dotenv
+from datetime import datetime, date, timedelta
+import subprocess
+import sys
+
+# 加载环境变量
+load_dotenv()
+
+# 字段中文别名映射
+COLUMN_DISPLAY_MAP = {
+    "execute_date": "选股日期",
+    "execute_time": "选股时间",
+    "ts_code": "股票代码",
+    "stock_name": "股票名称",
+    "trade_date": "开盘日",
+    "price_open": "开盘价",
+    "price_close": "收盘价",
+    "price_high": "最高价",
+    "price_low": "最低价",
+    "vol": "量",
+    "amount": "金额",
+    "buy_date": "建议买入日期",
+    "gold_date": "AI 观察日"
+}
+
+# 页面配置
+st.set_page_config(
+    page_title="Quantum Stock | 智能选股",
+    page_icon="static/quantum_stock_icon.svg",
+    layout="wide",
+)
+
+# --- 登录验证逻辑 ---
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def check_login():
+    expected_username = os.getenv("APP_USERNAME", "admin")
+    expected_password = os.getenv("APP_PASSWORD", "admin")
+    
+    if st.session_state.username_input == expected_username and st.session_state.password_input == expected_password:
+        st.session_state.authenticated = True
+    else:
+        st.error("用户名或密码错误")
+
+if not st.session_state.authenticated:
+    # 简单的登录页面样式
+    st.markdown("""
+    <style>
+        div[data-testid="stForm"] {
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            background-color: white;
+        }
+        .stApp {
+            background-color: #F5F5F7;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("<h1 style='text-align: center; color: #1D1D1F; margin-bottom: 30px;'>Quantum Stock Login</h1>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("login_form"):
+            st.text_input("用户名", key="username_input")
+            st.text_input("密码", type="password", key="password_input")
+            st.form_submit_button("登录", type="primary", on_click=check_login, use_container_width=True)
+    
+    st.stop()
+
+# --- 登录成功后显示退出按钮 ---
+st.sidebar.button("退出登录", on_click=lambda: st.session_state.update(authenticated=False))
+
+logo_path = "static/quantum_stock_icon.svg"
+col_logo, col_title = st.columns([1, 4])
+with col_logo:
+    st.image(logo_path, width=80)
+with col_title:
+    # 使用 Markdown 自定义标题样式 (银色/浅灰色)
+    st.markdown('<h1 style="color: #C0C0C0;">QUANTUM STOCK | 智能选股系统</h1>', unsafe_allow_html=True)
+
+# --- CSS 美化 (Apple Developer 风格) ---
+st.markdown("""
+<style>
+    /* 全局字体与配色 */
+    .stApp {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: #1D1D1F;
+    }
+    
+    /* 统一输入框宽度 (约20字符) */
+    div[data-testid="stTextInput"], 
+    div[data-testid="stDateInput"], 
+    div[data-testid="stSelectbox"],
+    div[data-testid="stNumberInput"] {
+        max-width: 220px !important;
+        width: 220px !important;
+    }
+    
+    /* 按钮样式 (Apple Blue) */
+    div.stButton > button {
+        border-radius: 6px;
+        font-weight: 500;
+        border: none;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        transition: background-color 0.2s;
+    }
+    div.stButton > button[kind="primary"] {
+        background-color: #007AFF; 
+        color: white;
+    }
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #0051A8;
+    }
+    div.stButton > button[kind="secondary"] {
+        background-color: #F5F5F7;
+        color: #1D1D1F;
+    }
+    
+    /* Tab 样式微调 */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 16px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 14px;
+        font-weight: 500;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- 侧边栏：数据库配置 ---
+st.sidebar.header("数据库连接配置")
+
+# 尝试从环境变量获取默认值
+default_host = os.getenv("DB_HOST", "localhost")
+default_port = os.getenv("DB_PORT", "3306")
+default_user = os.getenv("DB_USER", "root")
+default_password = os.getenv("DB_PASSWORD", "")
+default_db = os.getenv("DB_NAME", "")
+
+# 允许用户在界面上覆盖
+db_host = st.sidebar.text_input("Host", value=default_host)
+db_port = st.sidebar.text_input("Port", value=default_port)
+db_user = st.sidebar.text_input("User", value=default_user)
+db_password = st.sidebar.text_input("Password", value=default_password, type="password")
+db_name = st.sidebar.text_input("Database Name", value=default_db)
+
+# 构建数据库连接 URL
+# format: mysql+pymysql://user:password@host:port/dbname
+# TiDB Cloud 需要 SSL 安全连接，即使不指定 ca 证书，通常也建议加上 ssl_verify_cert=true 或者默认尝试 SSL
+# 这里针对 TiDB Cloud 进行特殊处理，添加 ssl={"ssl_ca": "/etc/ssl/cert.pem"} 如果需要的话
+# 简化起见，TiDB Cloud 通常支持标准的 SSL 连接，我们可以尝试添加 ?ssl_ca=/etc/ssl/cert.pem&ssl_verify_cert=true
+# 或者更简单的：mysql+pymysql://user:password@host:port/dbname?ssl={"ssl_mode":"PREFERRED"}
+
+if "tidbcloud" in db_host:
+    # TiDB Cloud 连接字符串优化
+    db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?ssl_ca=/etc/ssl/cert.pem&ssl_verify_cert=true"
+else:
+    db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
+# 连接测试与引擎创建
+@st.cache_resource
+def get_engine(url):
+    return create_engine(url)
+
+engine = None
+connection_success = False
+
+if st.sidebar.button("测试/刷新连接"):
+    try:
+        engine = get_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        st.sidebar.success("连接成功！")
+        connection_success = True
+    except Exception as e:
+        st.sidebar.error(f"连接失败: {e}")
+else:
+    # 尝试自动连接
+    if db_name and db_user:
+        try:
+            engine = get_engine(db_url)
+            connection_success = True
+        except:
+            pass
+
+import baostock as bs
+
+# --- 辅助函数：更新股票名称 ---
+def update_stock_names_from_baostock(engine):
+    """
+    从 BaoStock 获取全市场股票名称并更新到 stock_name 表
+    返回: (success: bool, message: str, count: int)
+    """
+    try:
+        # 1. 登录 BaoStock
+        lg = bs.login()
+        if lg.error_code != '0':
+            return False, f"BaoStock 登录失败: {lg.error_msg}", 0
+
+        # 2. 获取所有股票列表
+        today = date.today().strftime('%Y-%m-%d')
+        rs = bs.query_all_stock(day=today)
+        
+        data_list = []
+        while (rs.error_code == '0') & rs.next():
+            data_list.append(rs.get_row_data())
+            
+        result = pd.DataFrame(data_list, columns=rs.fields)
+        
+        # 如果今天没数据（可能是周末/节假日），尝试回退几天
+        if result.empty:
+            for i in range(1, 5):
+                prev_date = (date.today() - timedelta(days=i)).strftime('%Y-%m-%d')
+                rs = bs.query_all_stock(day=prev_date)
+                data_list = []
+                while (rs.error_code == '0') & rs.next():
+                    data_list.append(rs.get_row_data())
+                result = pd.DataFrame(data_list, columns=rs.fields)
+                if not result.empty:
+                    break
+        
+        if result.empty:
+            bs.logout()
+            return False, "未获取到股票数据，请检查网络或 BaoStock 服务状态", 0
+
+        # 3. 数据处理
+        # BaoStock: sh.600000 -> Tushare: 600000.SH
+        def convert_code(baostock_code):
+            if not baostock_code or "." not in baostock_code:
+                return baostock_code
+            market, code = baostock_code.split(".")
+            return f"{code}.{market.upper()}"
+
+        df_save = pd.DataFrame()
+        df_save['ts_code'] = result['code'].apply(convert_code)
+        df_save['ts_code_name'] = result['code_name']
+        
+        # 过滤掉空的名称
+        df_save = df_save[df_save['ts_code_name'] != '']
+        
+        if df_save.empty:
+             bs.logout()
+             return False, "处理后数据为空", 0
+
+        # 4. 存入数据库
+        with engine.connect() as conn:
+            # 创建表 (如果不存在)
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS stock_name (
+                ts_code VARCHAR(20) PRIMARY KEY,
+                ts_code_name VARCHAR(50)
+            )
+            """))
+            # 清空表
+            conn.execute(text("TRUNCATE TABLE stock_name"))
+            conn.commit()
+            
+        # 写入新数据
+        df_save.to_sql('stock_name', engine, if_exists='append', index=False, chunksize=1000)
+        
+        count = len(df_save)
+        bs.logout()
+        return True, "成功", count
+
+    except Exception as e:
+        bs.logout()
+        return False, f"发生异常: {str(e)}", 0
+
+# --- 辅助函数：运行外部脚本 ---
+def run_script(script_path, inputs):
+    """
+    运行外部 Python 脚本并流式输出结果
+    :param script_path: 脚本绝对路径
+    :param inputs: 输入列表，将按顺序发送给脚本的 input()
+    """
+    if not os.path.exists(script_path):
+        st.error(f"找不到脚本文件: {script_path}")
+        return
+
+    cmd = [sys.executable, script_path]
+    
+    # 准备输入数据
+    input_str = "\n".join(inputs) + "\n"
+    
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # 写入输入
+        try:
+            process.stdin.write(input_str)
+            process.stdin.flush()
+            process.stdin.close()
+        except Exception as e:
+            st.error(f"写入输入失败: {e}")
+
+        # 显示输出容器
+        output_container = st.empty()
+        full_output = ""
+        
+        # 读取输出
+        while True:
+            output_line = process.stdout.readline()
+            error_line = process.stderr.readline()
+            
+            if output_line == '' and error_line == '' and process.poll() is not None:
+                break
+                
+            if output_line:
+                full_output += output_line
+                # 实时刷新显示（仅显示最后 20 行以避免过长，或者显示完整日志）
+                output_container.code(full_output, language="bash")
+                
+            if error_line:
+                full_output += f"ERROR: {error_line}"
+                output_container.code(full_output, language="bash")
+                
+        return_code = process.poll()
+        if return_code == 0:
+            st.success("脚本执行完成！")
+        else:
+            st.error(f"脚本执行出错，退出码: {return_code}")
+            
+    except Exception as e:
+        st.error(f"运行脚本时发生错误: {e}")
+
+# --- 主功能区 ---
+
+if not connection_success:
+    st.info("请在左侧侧边栏配置数据库连接信息并点击“测试/刷新连接”。")
+    st.stop()
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 选股池查询", "⚡ 执行选股", "📈 日K线抽取", "💾 选股池管理", "📥 股票名称抽取"])
+
+# --- Tab 1: 数据查询 ---
+with tab1:
+    # 布局：6个条件 + 1个按钮 + 占位符 (靠左对齐)
+    # 间隔说明：输入框之间约3字符(0.3)，按钮前约5字符(0.5)
+    c1, _, c2, _, c3, _, c4, _, c5, _, c6, _, c7, c8 = st.columns([1.2, 0.3, 1.2, 0.3, 1.2, 0.3, 1.2, 0.3, 1.2, 0.3, 1.2, 0.5, 0.8, 0.5], vertical_alignment="bottom")
+    
+    with c1:
+        search_start_date = st.date_input("建议买入日期 (Start)", value=None)
+    with c2:
+        search_end_date = st.date_input("建议买入日期 (End)", value=None)
+    with c3:
+        gold_start_date = st.date_input("AI 观察日 (Start)", value=None)
+    with c4:
+        gold_end_date = st.date_input("AI 观察日 (End)", value=None)
+    with c5:
+        # 动态获取选股日期列表
+        query_dates_list = []
+        try:
+            if connection_success:
+                 with engine.connect() as conn:
+                    df_q_dates = pd.read_sql("SELECT DISTINCT execute_date FROM stock_selected ORDER BY execute_date DESC", conn)
+                    if not df_q_dates.empty:
+                        query_dates_list = df_q_dates['execute_date'].astype(str).tolist()
+        except Exception:
+            pass
+            
+        search_execute_date = st.selectbox(
+            "选股日期", 
+            options=query_dates_list, 
+            index=None, 
+            placeholder="请选择"
+        )
+    with c6:
+        search_ts_code = st.text_input("股票代码", placeholder="例如: 000001.SZ")
+    with c7:
+        run_query = st.button("查询", type="primary")
+        
+    if run_query:
+        st.session_state.query_active = True
+        st.session_state.query_page = 1
+        st.session_state.query_params = {
+            "search_ts_code": search_ts_code,
+            "search_start_date": search_start_date,
+            "search_end_date": search_end_date,
+            "gold_start_date": gold_start_date,
+            "gold_end_date": gold_end_date,
+            "search_execute_date": search_execute_date
+        }
+
+    if st.session_state.get("query_active", False):
+        params = st.session_state.query_params
+        
+        # 基础查询条件
+        base_where = " WHERE 1=1"
+        sql_params = {}
+        
+        if params["search_ts_code"]:
+            base_where += " AND t1.ts_code LIKE :ts_code"
+            sql_params['ts_code'] = f"%{params['search_ts_code']}%"
+        
+        if params["search_start_date"]:
+            base_where += " AND t1.buy_date >= :start_date"
+            sql_params['start_date'] = params["search_start_date"].strftime('%Y%m%d')
+        if params["search_end_date"]:
+            base_where += " AND t1.buy_date <= :end_date"
+            sql_params['end_date'] = params["search_end_date"].strftime('%Y%m%d')
+
+        if params["gold_start_date"]:
+            base_where += " AND t1.gold_date >= :gold_start"
+            sql_params['gold_start'] = params["gold_start_date"].strftime('%Y%m%d')
+        if params["gold_end_date"]:
+            base_where += " AND t1.gold_date <= :gold_end"
+            sql_params['gold_end'] = params["gold_end_date"].strftime('%Y%m%d')
+
+        if params.get("search_execute_date"):
+            base_where += " AND t1.execute_date = :execute_date"
+            sql_params['execute_date'] = params["search_execute_date"]
+
+        # 分页参数
+        page_size = 50
+        current_page = st.session_state.get("query_page", 1)
+        offset = (current_page - 1) * page_size
+        
+        try:
+            with engine.connect() as conn:
+                # 1. 查询总条数
+                count_query = text(f"SELECT COUNT(*) FROM stock_selected t1 {base_where}")
+                total_count = conn.execute(count_query, sql_params).scalar()
+                
+                # 2. 查询当前页数据
+                data_query = text(f"""
+                    SELECT 
+                        t1.buy_date, t1.gold_date, t1.execute_date, t1.execute_time, 
+                        t1.ts_code, t2.ts_code_name as stock_name,
+                        t1.trade_date, t1.price_open, t1.price_close, t1.price_high, t1.price_low,
+                        t1.vol, t1.amount
+                    FROM stock_selected t1
+                    LEFT JOIN stock_name t2 ON t1.ts_code = t2.ts_code
+                    {base_where}
+                    ORDER BY t1.trade_date DESC 
+                    LIMIT :limit OFFSET :offset
+                """)
+                # 合并分页参数
+                query_params = sql_params.copy()
+                query_params.update({"limit": page_size, "offset": offset})
+                
+                df = pd.read_sql(data_query, conn, params=query_params)
+            
+            # 数据处理与展示
+            if not df.empty:
+                # 格式化日期
+                date_cols = ['trade_date', 'buy_date', 'gold_date']
+                for col in date_cols:
+                    if col in df.columns:
+                        df[col] = df[col].astype(str).apply(
+                            lambda x: f"{x[:4]}-{x[4:6]}-{x[6:]}" if len(x) == 8 and x.isdigit() else x
+                        )
+                
+                # 链接处理
+                def make_sina_link(code):
+                    if not isinstance(code, str) or "." not in code:
+                        return code
+                    try:
+                        symbol, suffix = code.split('.')
+                        market = suffix.lower()
+                        sina_code = f"{market}{symbol}"
+                        url = f"https://finance.sina.com.cn/realstock/company/{sina_code}/nc.shtml?display_code={code}"
+                        return url
+                    except:
+                        return code
+
+                if 'ts_code' in df.columns:
+                    df['ts_code'] = df['ts_code'].apply(make_sina_link)
+
+            df_display = df.rename(columns=COLUMN_DISPLAY_MAP)
+            
+            # 调整列顺序
+            cols = list(df_display.columns)
+            if "股票代码" in cols and "股票名称" in cols:
+                cols.remove("股票名称")
+                idx = cols.index("股票代码")
+                cols.insert(idx + 1, "股票名称")
+                df_display = df_display[cols]
+                
+            st.dataframe(
+                df_display, 
+                width="stretch",
+                column_config={
+                    "股票代码": st.column_config.LinkColumn(
+                        "股票代码",
+                        display_text=r"display_code=(.*)",
+                    ),
+                    "股票名称": st.column_config.TextColumn(
+                        "股票名称",
+                        width="medium",
+                    ),
+                    "量": st.column_config.NumberColumn(
+                        "量",
+                        format="%d",
+                        step=1,
+                    ),
+                    "金额": st.column_config.NumberColumn(
+                        "金额",
+                        format="%.2f",
+                        step=0.01,
+                    )
+                }
+            )
+            
+            # 分页控件
+            total_pages = (total_count + page_size - 1) // page_size
+            if total_pages > 0:
+                col_prev, col_info, col_next = st.columns([1, 2, 1])
+                with col_prev:
+                    if current_page > 1:
+                        if st.button("上一页", key="prev_page"):
+                            st.session_state.query_page -= 1
+                            st.rerun()
+                
+                with col_info:
+                    st.markdown(f"<div style='text-align: center; line-height: 2.5;'>第 {current_page} / {total_pages} 页 (共 {total_count} 条)</div>", unsafe_allow_html=True)
+                
+                with col_next:
+                    if current_page < total_pages:
+                        if st.button("下一页", key="next_page"):
+                            st.session_state.query_page += 1
+                            st.rerun()
+            else:
+                st.info("未查询到数据")
+
+        except Exception as e:
+            st.error(f"查询出错: {e}")
+
+# --- Tab 2: 新增数据 (选股) ---
+with tab2:
+    script_path_select = os.path.join(os.path.dirname(__file__), "utils", "tushare_select_stock.py")
+    
+    with st.form("select_stock_form"):
+        # 布局：2个条件 + 1个按钮 + 占位符 (靠左对齐)
+        # 间隔说明：输入框之间约3字符(0.2)，按钮前约5字符(0.35)
+        c1, _, c2, _, c3, c4 = st.columns([1.2, 0.2, 1.2, 0.35, 0.8, 4], vertical_alignment="bottom")
+        
+        with c1:
+            # 默认前4天
+            default_start = date.today() - timedelta(days=4)
+            in_start_date = st.date_input("数据起始日期", value=default_start, key="sel_start")
+        with c2:
+            in_end_date = st.date_input("数据结束日期", value=date.today(), key="sel_end")
+        with c3:
+            submit_select = st.form_submit_button("执行选股", type="primary")
+    
+    if submit_select:
+        # 转换日期格式为 YYYYMMDD
+        start_str = in_start_date.strftime('%Y%m%d')
+        end_str = in_end_date.strftime('%Y%m%d')
+        
+        st.info(f"正在执行脚本: {script_path_select}")
+        st.info(f"参数: {start_str} - {end_str}")
+        
+        run_script(script_path_select, [start_str, end_str])
+
+# --- Tab 3: 日K线抽取 ---
+with tab3:
+    st.markdown('<span style="color: #C0C0C0;">拉取 Tushare 日线数据并存入数据库。</span>', unsafe_allow_html=True)
+    
+    script_path_update = os.path.join(os.path.dirname(__file__), "utils", "tushare_update_daily.py")
+    
+    with st.form("update_daily_form"):
+        # 布局：2个条件 + 1个按钮 + 占位符 (靠左对齐)
+        # 间隔说明：输入框之间约3字符(0.2)，按钮前约5字符(0.35)
+        c1, _, c2, _, c3, c4 = st.columns([1.2, 0.2, 1.2, 0.35, 0.8, 4], vertical_alignment="bottom")
+        
+        with c1:
+            in_update_start = st.date_input("开始日期", value=date.today(), key="upd_start")
+        with c2:
+            in_update_end = st.date_input("结束日期", value=date.today(), key="upd_end")
+        with c3:
+            submit_update = st.form_submit_button("开始抽取", type="primary")
+        
+    if submit_update:
+        # 转换日期格式为 YYYYMMDD
+        start_str = in_update_start.strftime('%Y%m%d')
+        end_str = in_update_end.strftime('%Y%m%d')
+        
+        st.info(f"正在执行脚本: {script_path_update}")
+        st.info(f"参数: {start_str} - {end_str}")
+        
+        run_script(script_path_update, [start_str, end_str])
+
+# --- Tab 4: 数据管理 ---
+with tab4:
+    # 1. 获取选股日期下拉列表
+    dates_list = []
+    try:
+        with engine.connect() as conn:
+            # 仅查询有数据的日期，降序排列
+            df_dates = pd.read_sql("SELECT DISTINCT execute_date FROM stock_selected ORDER BY execute_date DESC", conn)
+            if not df_dates.empty:
+                dates_list = df_dates['execute_date'].astype(str).tolist()
+    except Exception as e:
+        st.error(f"加载日期列表失败: {e}")
+
+    # 布局：日期 | 时间 | 删除按钮 | 占位 (靠左对齐)
+    # 间隔说明：输入框之间约3字符(0.2)，按钮前约5字符(0.35)
+    c1, _, c2, _, c3, c4 = st.columns([1.2, 0.2, 1.2, 0.35, 0.8, 4], vertical_alignment="bottom")
+
+    with c1:
+        selected_date = st.selectbox(
+            "选择选股日期", 
+            options=dates_list,
+            index=0 if dates_list else None,
+            key="manage_date",
+            placeholder="请选择日期"
+        )
+
+    # 2. 根据选择的日期获取对应的时间下拉列表
+    times_list = []
+    if selected_date:
+        try:
+            with engine.connect() as conn:
+                query_time = text("SELECT DISTINCT execute_time FROM stock_selected WHERE execute_date = :date ORDER BY execute_time DESC")
+                df_times = pd.read_sql(query_time, conn, params={"date": selected_date})
+                if not df_times.empty:
+                    times_list = df_times['execute_time'].astype(str).tolist()
+        except Exception as e:
+            st.error(f"加载时间列表失败: {e}")
+            
+    with c2:
+        selected_time = st.selectbox(
+            "选择选股时间", 
+            options=times_list,
+            index=0 if times_list else None,
+            key="manage_time",
+            placeholder="请选择时间"
+        )
+
+    with c3:
+        delete_btn = st.button("删除记录", type="primary", key="del_btn")
+
+    # 信息展示区 (优先显示 session_state 中的消息)
+    if "manage_msg" in st.session_state:
+        msg = st.session_state["manage_msg"]
+        if msg["type"] == "success":
+            st.success(msg["content"])
+        elif msg["type"] == "error":
+            st.error(msg["content"])
+        elif msg["type"] == "warning":
+            st.warning(msg["content"])
+        elif msg["type"] == "info":
+            st.info(msg["content"])
+
+    if delete_btn:
+        if not selected_date or not selected_time:
+            st.warning("请先选择完整的日期和时间条件！")
+        else:
+            try:
+                # 使用事务进行删除
+                with engine.begin() as conn:
+                    del_sql = text("DELETE FROM stock_selected WHERE execute_date = :date AND execute_time = :time")
+                    result = conn.execute(del_sql, {"date": selected_date, "time": selected_time})
+                    deleted_count = result.rowcount
+                
+                if deleted_count > 0:
+                    # 存入 session_state 并立即刷新
+                    st.session_state["manage_msg"] = {
+                        "type": "success", 
+                        "content": f"✅ 删除成功！共删除 {deleted_count} 条记录。\n(日期: {selected_date}, 时间: {selected_time})"
+                    }
+                    st.rerun()
+                else:
+                    st.info("未找到匹配的记录，未执行删除。")
+                    
+            except Exception as e:
+                st.error(f"删除失败: {e}")
+
+# --- Tab 5: 股票名称抽取 ---
+with tab5:
+    st.markdown('<span style="color: #C0C0C0;">从 BaoStock 抽取全部股票名称。</span>', unsafe_allow_html=True)
+    
+    if st.button("抽取", type="primary", key="extract_names_btn"):
+        with st.spinner("正在连接 BaoStock 并获取数据，请稍候..."):
+            success, msg, count = update_stock_names_from_baostock(engine)
+            
+        if success:
+            st.success(f"抽取成功，共获取到 {count} 条股票记录。")
+        else:
+            st.error(f"抽取失败: {msg}")
