@@ -7,3 +7,4 @@ cryptography
 tushare
 chinese_calendar
 mysql-connector-python
+baostock
