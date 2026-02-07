@@ -190,6 +190,14 @@ st.markdown("""
     .stDeployButton {display:none;}
     div[data-testid="stDecoration"] {display:none;}
     div[data-testid="stStatusWidget"] {display:none;}
+    div[data-testid="stToolbar"] {display: none;}
+    
+    /* 尝试隐藏底部的 Viewer Badge (Cloud 上的 'Hosted with Streamlit' / 'Manage app') */
+    .viewerBadge_container__1QSob {display: none !important;}
+    div[data-testid="stToolbar"] {display: none !important;}
+    
+    /* 隐藏任何可能的固定定位底部按钮 */
+    div[style*="position: fixed"][style*="bottom: 0px"] {display: none !important;}
 </style>
 """, unsafe_allow_html=True)
 
