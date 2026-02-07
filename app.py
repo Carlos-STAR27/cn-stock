@@ -6,10 +6,24 @@ from dotenv import load_dotenv
 from datetime import datetime, date, timedelta
 import subprocess
 import sys
+from utils.db_utils import get_config, get_db_engine  # 复用 db_utils 中的逻辑
 
 # 加载环境变量
 load_dotenv()
 load_dotenv('.env.local')
+
+# --- 数据库连接 (带缓存) ---
+@st.cache_resource
+def get_engine():
+    """获取全局数据库连接引擎 (带缓存)"""
+    return get_db_engine()
+
+# 初始化 engine
+try:
+    engine = get_engine()
+except Exception as e:
+    st.error(f"数据库连接失败: {e}")
+    engine = None
 
 # 字段中文别名映射
 COLUMN_DISPLAY_MAP = {
@@ -40,8 +54,8 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 def check_login():
-    expected_username = os.getenv("APP_USERNAME", "admin")
-    expected_password = os.getenv("APP_PASSWORD", "admin")
+    expected_username = get_config("APP_USERNAME", "admin")
+    expected_password = get_config("APP_PASSWORD", "admin")
     
     if st.session_state.username_input == expected_username and st.session_state.password_input == expected_password:
         st.session_state.authenticated = True

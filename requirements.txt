@@ -8,3 +8,4 @@ tushare
 chinese_calendar
 mysql-connector-python
 baostock
+certifi==2026.1.4
