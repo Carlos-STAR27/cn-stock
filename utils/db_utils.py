@@ -4,6 +4,7 @@ from datetime import datetime
 import traceback
 from dotenv import load_dotenv
 import certifi
+import urllib.parse
 
 # 加载环境变量 (优先加载 .env, 然后 .env.local)
 load_dotenv()
@@ -38,6 +39,9 @@ def get_db_engine():
     db_password = get_config('DB_PASSWORD')
     db_name = get_config('DB_NAME')
     
+    if not all([db_host, db_user, db_password, db_name]):
+        raise ValueError("❌ 缺少必要的数据库配置。请检查 .env 文件或 Streamlit Secrets 设置 (DB_HOST, DB_USER, DB_PASSWORD, DB_NAME)")
+    
     # SSL 配置
     ssl_ca = get_config('TIDB_CA_PATH')
     
@@ -60,7 +64,11 @@ def get_db_engine():
     except (ValueError, TypeError):
         db_port = 3306
         
-    url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    # 对用户名和密码进行 URL 编码，防止特殊字符导致连接失败
+    safe_user = urllib.parse.quote_plus(db_user)
+    safe_password = urllib.parse.quote_plus(db_password)
+        
+    url = f"mysql+pymysql://{safe_user}:{safe_password}@{db_host}:{db_port}/{db_name}"
     
     # 增加连接池配置，提高稳定性
     return create_engine(

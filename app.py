@@ -94,12 +94,46 @@ if not st.session_state.authenticated:
 # --- 登录成功后显示退出按钮 ---
 st.sidebar.button("退出登录", on_click=lambda: st.session_state.update(authenticated=False))
 
+# --- 数据库连接状态监测 ---
+if engine is None:
+    st.sidebar.error("❌ 数据库连接异常")
+    
+    # 获取详细的异常信息（如果有）
+    try:
+        get_engine()
+    except Exception as e:
+        # 显示完整错误堆栈，帮助定位问题
+        st.sidebar.exception(e)
+        
+        # 常见问题提示
+        if "Access denied" in str(e):
+            st.sidebar.warning("可能是用户名或密码错误")
+        elif "Can't connect" in str(e):
+            st.sidebar.warning("可能是网络连接问题或 IP 白名单限制")
+        elif "NoneType" in str(e) or "None" in str(e):
+            st.sidebar.warning("可能是缺少必要的配置 (Streamlit Secrets)")
+
+    # 显示详细的 SSL 路径调试信息
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 SSL 诊断")
+    try:
+        debug_info = get_db_config_debug()
+        st.sidebar.text(f"Raw CA: {debug_info.get('raw_ssl_ca')}")
+        st.sidebar.text(f"Raw Exists: {debug_info.get('raw_ssl_ca_exists')}")
+        st.sidebar.text(f"Final CA: {debug_info.get('final_ssl_ca')}")
+        st.sidebar.text(f"Final Exists: {debug_info.get('final_ssl_ca_exists')}")
+        st.sidebar.text(f"Certifi: {debug_info.get('certifi_where')}")
+    except Exception as debug_e:
+        st.sidebar.error(f"Debug failed: {debug_e}")
+else:
+    # 连接成功，仅显示状态指示器
+    st.sidebar.success("✅ 数据库已连接")
+
 logo_path = "static/quantum_stock_icon.svg"
 col_logo, col_title = st.columns([1, 4])
 with col_logo:
     st.image(logo_path, width=80)
 with col_title:
-    # 使用 Markdown 自定义标题样式 (银色/浅灰色)
     st.markdown('<h1 style="color: #C0C0C0;">QUANTUM STOCK | 智能选股系统</h1>', unsafe_allow_html=True)
 
 # --- CSS 美化 (Apple Developer 风格) ---
@@ -148,6 +182,14 @@ st.markdown("""
         font-size: 14px;
         font-weight: 500;
     }
+
+    /* 隐藏 Streamlit Cloud 的 Manage app 按钮和页脚 */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display:none;}
+    div[data-testid="stDecoration"] {display:none;}
+    div[data-testid="stStatusWidget"] {display:none;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -157,6 +199,7 @@ st.sidebar.header("系统状态")
 # 检查连接状态
 if engine:
     try:
+        # 简单的连接测试
         with engine.connect() as conn:
             pass
         st.sidebar.success("✅ 数据库已连接")
@@ -166,7 +209,7 @@ if engine:
         st.sidebar.caption(f"Host: {db_host[:15]}...")
     except Exception as e:
         st.sidebar.error("❌ 数据库连接异常")
-        st.sidebar.caption(f"Error: {str(e)[:50]}...")
+        st.sidebar.exception(e)  # 显示完整堆栈
         
         # 显示详细的 SSL 路径调试信息
         st.sidebar.markdown("---")
@@ -181,6 +224,8 @@ if engine:
         except Exception as debug_e:
             st.sidebar.error(f"Debug failed: {debug_e}")
 else:
+    # 此时 engine 为 None，通常在 db_utils 抛出异常时发生 (已被上方 try-except 捕获)
+    # 但为了保险，这里再次显示提示
     st.sidebar.error("❌ 数据库未连接")
     st.sidebar.info("请检查 .env 文件或 Secrets 配置")
     
@@ -314,18 +359,18 @@ with tab1:
         # 动态获取选股日期列表
         query_dates_list = []
         try:
-            if connection_success:
+            if engine:
                  with engine.connect() as conn:
                     df_q_dates = pd.read_sql("SELECT DISTINCT execute_date FROM stock_selected ORDER BY execute_date DESC", conn)
                     if not df_q_dates.empty:
                         query_dates_list = df_q_dates['execute_date'].astype(str).tolist()
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"获取选股日期失败: {e}")
             
         search_execute_date = st.selectbox(
             "选股日期", 
             options=query_dates_list, 
-            index=None, 
+            index=0 if query_dates_list else None, 
             placeholder="请选择"
         )
     with c6:
