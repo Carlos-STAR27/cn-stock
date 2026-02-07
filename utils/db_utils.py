@@ -41,7 +41,12 @@ def get_db_engine():
     # SSL 配置
     ssl_ca = get_config('TIDB_CA_PATH')
     
-    # 如果未指定 CA 路径，尝试使用 certifi 的默认路径 (适用于 Streamlit Cloud 等环境)
+    # 如果指定了 CA 路径但文件不存在 (常见于云端环境配置不一致)，则强制使用 certifi
+    if ssl_ca and not os.path.exists(ssl_ca):
+        print(f"⚠️ Warning: Configured TIDB_CA_PATH '{ssl_ca}' not found. Falling back to certifi.")
+        ssl_ca = None
+
+    # 如果未指定 CA 路径 (或路径无效)，尝试使用 certifi 的默认路径 (适用于 Streamlit Cloud 等环境)
     if not ssl_ca:
         ssl_ca = certifi.where()
     
