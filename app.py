@@ -151,46 +151,41 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 侧边栏：数据库配置 ---
+# --- 侧边栏：系统状态 ---
 st.sidebar.header("系统状态")
 
-# 从环境变量获取配置
-db_host = os.getenv("DB_HOST")
-db_port = os.getenv("DB_PORT", "3306")
-db_user = os.getenv("DB_USER")
-db_password = os.getenv("DB_PASSWORD")
-db_name = os.getenv("DB_NAME")
-ssl_ca = os.getenv("TIDB_CA_PATH", "/etc/ssl/cert.pem")
-
-# 构建数据库连接 URL
-connect_args = {}
-if db_host and 'tidbcloud' in db_host:
-    connect_args['ssl'] = {'ca': ssl_ca, 'check_hostname': False}
-
-db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-
-# 连接测试与引擎创建
-@st.cache_resource
-def get_engine(url, connect_args):
-    return create_engine(url, connect_args=connect_args)
-
-engine = None
-connection_success = False
-
-try:
-    if db_host and db_user:
-        engine = get_engine(db_url, connect_args)
-        # 简单测试连接
+# 检查连接状态
+if engine:
+    try:
         with engine.connect() as conn:
-             pass
-        connection_success = True
+            pass
         st.sidebar.success("✅ 数据库已连接")
-    else:
-        st.sidebar.warning("⚠️ 缺少数据库环境变量配置")
-except Exception as e:
-    st.sidebar.error("❌ 数据库连接失败")
-    # 仅在调试模式或本地开发时打印详细错误，生产环境隐藏
-    # st.sidebar.error(f"Error: {e}")
+        
+        # 显示连接信息 (Masked)
+        db_host = get_config("DB_HOST", "Unknown")
+        st.sidebar.caption(f"Host: {db_host[:15]}...")
+    except Exception as e:
+        st.sidebar.error("❌ 数据库连接异常")
+        st.sidebar.caption(f"Error: {str(e)[:50]}...")
+else:
+    st.sidebar.error("❌ 数据库未连接")
+    st.sidebar.info("请检查 .env 文件或 Secrets 配置")
+    
+    # 调试信息 (仅在连接失败时显示关键配置状态)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 调试信息")
+    
+    # 检查关键配置是否存在 (不显示具体值)
+    config_keys = ["DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"]
+    for key in config_keys:
+        val = get_config(key)
+        status = "✅ Configured" if val else "❌ Missing"
+        st.sidebar.text(f"{key}: {status}")
+        
+    # 打印尝试连接的 Host (Masked)
+    host_val = get_config("DB_HOST")
+    if host_val:
+        st.sidebar.text(f"Target Host: {host_val[:10]}***")
 
 # --- 辅助函数：读取任务日志 ---
 def get_task_logs(task_name, limit=20):
@@ -282,8 +277,8 @@ def run_script(script_path, inputs):
 
 # --- 主功能区 ---
 
-if not connection_success:
-    st.info("请在左侧侧边栏配置数据库连接信息并点击“测试/刷新连接”。")
+if not engine:
+    st.info("数据库连接初始化失败，请检查配置。")
     st.stop()
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 选股池查询", "⚡ 执行选股", "📈 日K线抽取", "💾 选股池管理", "📥 股票名称抽取"])
